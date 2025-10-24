@@ -40,12 +40,23 @@ def rsi(series, period=14):
     rs = roll_up / (roll_down + 1e-9)
     return 100 - (100 / (1 + rs))
 
-def score_momentum(df):
-    r = rsi(df["Close"]).iloc[-1]
+def score_momentum(df: pd.DataFrame) -> int:
+    # Handle empty or too-short dataframes gracefully
+    if df.empty or len(df) < 15 or "Close" not in df:
+        return 1  # neutral score
+    
+    try:
+        r = rsi(df["Close"]).iloc[-1]
+    except Exception:
+        return 1  # fallback if RSI can't compute
+    
+    if pd.isna(r):
+        return 1
     if r >= 60: return 3
     if r >= 50: return 2
     if r >= 40: return 1
     return 0
+
 
 def score_macro_placeholder(symbol):
     return 1
