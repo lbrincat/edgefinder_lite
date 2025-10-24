@@ -27,13 +27,15 @@ def get_prices(ticker: str, period: str = "6mo", interval: str = "1d") -> pd.Dat
             auto_adjust=True,
             progress=False,
         )
-        if isinstance(df, pd.DataFrame):
-            df = df.dropna()
-        else:
-            df = pd.DataFrame()
+        # yfinance sometimes returns a dict-like object on errors; guard for that
+        if not isinstance(df, pd.DataFrame):
+            return pd.DataFrame()
+
+        df = df.dropna()
+        return df
     except Exception:
-        df = pd.DataFrame()
-    return df
+        # if yfinance throws (rate limit, etc.), return empty
+        return pd.DataFrame()
 
 
 # ---------- SCORING HELPERS ----------
@@ -43,7 +45,8 @@ def score_trend(df: pd.DataFrame) -> int:
     Trend score 0-3 based on MA relationships and slope.
     Returns 1 (neutral) if we don't have enough data.
     """
-    if df.empty or "Close" not in df.columns:
+    # safety checks
+    if df is None or df.empty or "Close" not in df.columns:
         return 1
 
     close = df["Close"]
@@ -63,16 +66,25 @@ def score_trend(df: pd.DataFrame) -> int:
     score = 0
 
     # price above ma50
-    if close.iloc[-1] > ma50.iloc[-1]:
-        score += 1
+    try:
+        if close.iloc[-1] > ma50.iloc[-1]:
+            score += 1
+    except Exception:
+        pass
 
     # ma50 above ma200
-    if ma50.iloc[-1] > ma200.iloc[-1]:
-        score += 1
+    try:
+        if ma50.iloc[-1] > ma200.iloc[-1]:
+            score += 1
+    except Exception:
+        pass
 
-    # ma50 rising over last 5 candles
-    if len(ma50) >= 6 and (ma50.iloc[-1] - ma50.iloc[-6]) > 0:
-        score += 1
+    # ma50 rising over last ~5 bars
+    try:
+        if len(ma50) >= 6 and (ma50.iloc[-1] - ma50.iloc[-6]) > 0:
+            score += 1
+    except Exception:
+        pass
 
     return int(score)
 
@@ -80,6 +92,7 @@ def score_trend(df: pd.DataFrame) -> int:
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     """
     Standard RSI calc, returns a full Series.
+    If series is too short, you'll just get mostly NaN.
     """
     delta = series.diff()
 
@@ -99,15 +112,17 @@ def score_momentum(df: pd.DataFrame) -> int:
     Momentum score from RSI.
     Returns 1 (neutral) if we can't compute cleanly.
     """
-    if df.empty or "Close" not in df.columns:
+    if df is None or df.empty or "Close" not in df.columns:
         return 1
 
+    # We need enough points to compute RSI
     if len(df) < 15:
         return 1
 
     try:
         rsi_series = rsi(df["Close"])
-        if rsi_series.empty:
+        # guard: rsi_series could be all NaN
+        if rsi_series is None or len(rsi_series) == 0:
             return 1
         r = rsi_series.iloc[-1]
     except Exception:
@@ -126,14 +141,14 @@ def score_momentum(df: pd.DataFrame) -> int:
 
 def score_macro_placeholder(symbol: str) -> int:
     """
-    Placeholder until we wire Retail Sales / PMI / CPI.
+    Placeholder until we wire Retail Sales / PMI / CPI, etc.
     """
     return 1
 
 
 def score_cot_placeholder(symbol: str) -> int:
     """
-    Placeholder until we wire COT.
+    Placeholder until we wire COT positioning.
     """
     return 1
 
@@ -154,7 +169,7 @@ def safe_last_price(df: pd.DataFrame):
     """
     Get last close if available, else 'N/A'.
     """
-    if df.empty or "Close" not in df.columns:
+    if df is None or df.empty or "Close" not in df.columns:
         return "N/A"
     try:
         return float(df["Close"].iloc[-1])
@@ -166,7 +181,7 @@ def safe_last_date(df: pd.DataFrame):
     """
     Get last timestamp if available, else ''.
     """
-    if df.empty:
+    if df is None or df.empty:
         return ""
     try:
         return str(df.index[-1].date())
@@ -199,7 +214,7 @@ with st.status("Fetching data…", expanded=False) as status:
 
         total = trend + mom + macro + cot
 
-        rows.append({
+        row = {
             "Symbol": name,
             "Trend(0-3)": trend,
             "Momentum(0-3)": mom,
@@ -209,7 +224,9 @@ with st.status("Fetching data…", expanded=False) as status:
             "Recommendation": overall_recommendation(total),
             "Last Price": safe_last_price(df),
             "Updated": safe_last_date(df),
-        })
+        }
+
+        rows.append(row)
 
     status.update(label="Done", state="complete", expanded=False)
 
@@ -217,4 +234,4 @@ with st.status("Fetching data…", expanded=False) as status:
 df_table = pd.DataFrame(rows).sort_values("Total(0-12)", ascending=False)
 st.dataframe(df_table, use_container_width=True)
 
-st.caption("No crash version 😎. Macro & COT are placeholders. Next step: real Retail Sales / COT data feeding into Macro & COT scores.")
+st.caption("Stable build ✅ — No crashes on empty data. Macro & COT are still placeholders; next step is wiring real Retail Sales / PMI / COT.")
