@@ -45,13 +45,13 @@ def fetch_calendar_events():
                 "Referer": "https://economic-calendar.ct.ws/",
             },
         )
+         print("DEBUG-status:", resp.status_code)
+        print("DEBUG-first-300:", resp.text[:300])
         if resp.status_code == 200:
             return resp.json()
-        else:
-            # fallback if something weird happens
-            return []
-    except Exception:
-        return []
+    except Exception as e:
+        print("DEBUG-error:", e)
+    return []
 
 
 def _pct_to_float(pct_str):
