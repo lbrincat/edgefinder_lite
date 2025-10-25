@@ -15,7 +15,8 @@ REGION_CCY = {
 }
 
 # Your InfinityFree endpoint
-API_URL = "https://economic-calendar.ct.ws/calendar.php"
+API_URL = "https://economic-calendar.ct.ws/calendar.php?key=banana123"
+
 
 
 def fetch_calendar_events():
