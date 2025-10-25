@@ -19,18 +19,6 @@ API_URL = "https://economic-calendar.ct.ws/calendar.php"
 
 
 def fetch_calendar_events():
-    """
-    Fetch all econ events as JSON from your InfinityFree PHP script.
-    Expected per item:
-      {
-        "currency": "USD",
-        "event": "Retail Sales (MoM)",
-        "actual": "0.7%",
-        "forecast": "0.2%",
-        "previous": "0.3%",
-        "timestamp": "2025-10-22T12:30:00Z"
-      }
-    """
     try:
         resp = requests.get(
             API_URL,
@@ -45,13 +33,14 @@ def fetch_calendar_events():
                 "Referer": "https://economic-calendar.ct.ws/",
             },
         )
-         print("DEBUG-status:", resp.status_code)
+        print("DEBUG-status:", resp.status_code)
         print("DEBUG-first-300:", resp.text[:300])
         if resp.status_code == 200:
             return resp.json()
     except Exception as e:
         print("DEBUG-error:", e)
     return []
+
 
 
 def _pct_to_float(pct_str):
