@@ -19,6 +19,23 @@ API_URL = "https://economic-calendar.ct.ws/calendar.php"
 
 
 def fetch_calendar_events():
+    """
+    Fetch all econ events as JSON from your InfinityFree PHP script.
+
+    We expect each item in the JSON list to look like:
+    {
+        "currency": "USD",
+        "event": "Retail Sales (MoM)",
+        "actual": "0.7%",
+        "forecast": "0.2%",
+        "previous": "0.3%",
+        "timestamp": "2025-10-22T12:30:00Z"
+    }
+
+    We'll:
+    - send browser-like headers
+    - log what we got to help debug
+    """
     try:
         resp = requests.get(
             API_URL,
@@ -33,14 +50,24 @@ def fetch_calendar_events():
                 "Referer": "https://economic-calendar.ct.ws/",
             },
         )
+
         print("DEBUG-status:", resp.status_code)
         print("DEBUG-first-300:", resp.text[:300])
-        if resp.status_code == 200:
-            return resp.json()
-    except Exception as e:
-        print("DEBUG-error:", e)
-    return []
 
+        if resp.status_code == 200:
+            try:
+                data = resp.json()
+                print("DEBUG-json-sample:", data[:3] if isinstance(data, list) else data)
+                return data
+            except Exception as e:
+                print("DEBUG-json-parse-error:", e)
+                return []
+        else:
+            print("DEBUG-non-200:", resp.status_code, resp.text[:200])
+            return []
+    except Exception as e:
+        print("DEBUG-request-exception:", e)
+        return []
 
 
 def _pct_to_float(pct_str):
@@ -48,7 +75,7 @@ def _pct_to_float(pct_str):
     '0.7%' -> 0.7
     '-0.5%' -> -0.5
     '2.1%' -> 2.1
-    None or '' -> None
+    'N/A' or '' -> None
     """
     if not isinstance(pct_str, str):
         return None
@@ -77,11 +104,26 @@ def _num_to_float(x):
         return None
 
 
+def _parse_timestamp(ts_value):
+    """
+    We expect timestamps like '2025-10-22T12:30:00Z'.
+    If it's missing or bad, return datetime.min so sorting doesn't explode.
+    """
+    if not ts_value:
+        return datetime.min
+    try:
+        # fromisoformat can't handle 'Z' directly, so swap for '+00:00'
+        return datetime.fromisoformat(str(ts_value).replace("Z", "+00:00"))
+    except Exception:
+        return datetime.min
+
+
 def _pick_latest(events_for_ccy, keywords):
     """
-    From all events for one currency (USD, EUR, ...),
-    pick the most recent row whose 'event' field matches any keyword.
-    We'll sort by timestamp desc.
+    For a given currency's events (USD, EUR, ...),
+    find the most recent row whose 'event' matches any keyword in `keywords`.
+
+    We'll sort by timestamp desc and return the newest.
     """
     filtered = []
     for ev in events_for_ccy:
@@ -92,30 +134,25 @@ def _pick_latest(events_for_ccy, keywords):
     if not filtered:
         return None
 
-    def parse_ts(ts):
-        # timestamps are like "2025-10-22T12:30:00Z"
-        t = str(ts or "")
-        try:
-            return datetime.fromisoformat(t.replace("Z", "+00:00"))
-        except Exception:
-            return datetime.min
-
-    filtered.sort(key=lambda ev: parse_ts(ev.get("timestamp")), reverse=True)
+    filtered.sort(key=lambda ev: _parse_timestamp(ev.get("timestamp")), reverse=True)
     return filtered[0]
 
 
 def build_region_components(events_for_ccy):
     """
-    Extract 3 macro pillars for that currency:
-    Retail Sales, PMI, CPI.
-    Return (retail, pmi, cpi) where each is a dict
-    or None if not found.
+    From all events for this currency, extract:
+      Retail Sales (MoM / QoQ)
+      PMI (Manufacturing/Services/Composite)
+      CPI/Inflation (YoY)
+    and convert them into structured dicts.
+
+    Returns (retail, pmi, cpi) where each is either dict or None.
     """
 
-    # Retail Sales
+    # --- Retail Sales ---
     retail_ev = _pick_latest(
         events_for_ccy,
-        ["retail sales", "retail sales (mom)", "core retail sales"]
+        ["retail sales", "retail sales (mom)", "core retail sales", "retail sales (qoq)"]
     )
     retail = None
     if retail_ev:
@@ -125,7 +162,7 @@ def build_region_components(events_for_ccy):
             "previous": _pct_to_float(retail_ev.get("previous")),
         }
 
-    # PMI
+    # --- PMI ---
     pmi_ev = _pick_latest(
         events_for_ccy,
         ["pmi", "manufacturing pmi", "services pmi", "composite pmi"]
@@ -137,10 +174,10 @@ def build_region_components(events_for_ccy):
             "previous": _num_to_float(pmi_ev.get("previous")),
         }
 
-    # CPI / Inflation
+    # --- CPI / Inflation ---
     cpi_ev = _pick_latest(
         events_for_ccy,
-        ["cpi", "inflation", "inflation rate", "cpi (yoy)"]
+        ["cpi", "cpi (yoy)", "inflation", "inflation rate"]
     )
     cpi = None
     if cpi_ev:
@@ -155,10 +192,20 @@ def build_region_components(events_for_ccy):
 
 def score_region_macro(retail, pmi, cpi):
     """
-    +1 Retail Sales beat forecast or previous
-    +1 PMI >=50 or improving
-    +1 CPI hotter than forecast (implies rate pressure)
-    Clamp 0..3
+    Scoring rules (0 to 3 total):
+
+    +1 Retail Sales:
+        if actual > forecast OR actual > previous
+
+    +1 PMI:
+        if PMI >= 50 (expansion)
+        OR PMI is higher than previous
+
+    +1 CPI:
+        if inflation (actual) > forecast (hotter than expected)
+        OR (no forecast given but inflation >= 2.0)
+
+    Then clamp to [0, 3].
     """
     score = 0
 
@@ -188,7 +235,7 @@ def score_region_macro(retail, pmi, cpi):
         if act is not None:
             if fc is not None and act > fc:
                 score += 1
-            elif fc is None and act is not None and act >= 2.0:
+            elif fc is None and act >= 2.0:
                 score += 1
 
     if score < 0:
@@ -210,10 +257,19 @@ def summarize_bias(score: int):
 
 def build_region_snapshot(events, region_key):
     """
-    One region = one currency code.
-    Example: region_key 'us' -> USD.
-    We'll gather that currency's events and build:
-    { retail, pmi, cpi, score, bias }
+    Build one region's view:
+    {
+      "retail": {actual, forecast, previous},
+      "pmi":    {current, previous},
+      "cpi":    {actual_yoy, forecast_yoy, previous_yoy},
+      "score":  0-3,
+      "bias":   "Strong macro, bullish bias"
+    }
+
+    We do this by:
+    - finding all events where ev["currency"] == mapped currency (USD, EUR, ...)
+    - extracting latest Retail Sales, PMI, CPI
+    - scoring them
     """
     ccy = REGION_CCY.get(region_key)
     if not ccy:
@@ -226,6 +282,10 @@ def build_region_snapshot(events, region_key):
         }
 
     events_for_ccy = [ev for ev in events if ev.get("currency") == ccy]
+
+    # Debug: see what we're actually seeing per region
+    # (will show in Render logs)
+    print(f"DEBUG-{region_key}-events-sample:", events_for_ccy[:3])
 
     retail, pmi, cpi = build_region_components(events_for_ccy)
     score = score_region_macro(retail, pmi, cpi)
@@ -243,21 +303,24 @@ def build_region_snapshot(events, region_key):
 @st.cache_data(ttl=43200, show_spinner=False)
 def get_macro_snapshot_all():
     """
-    Pull data (cached ~12h) and build the macro snapshot for all regions.
-    Shape:
+    Called by Home.py and Macro Dashboard.
+    Returns:
     {
       "us": {...},
       "eurozone": {...},
-      "uk": {...},
-      ...
+      ...,
       "last_updated": "2025-10-25 14:07 UTC"
     }
     """
     events = fetch_calendar_events()
+
+    # Debug: top-level log
+    print("DEBUG-total-events:", len(events))
 
     snapshot = {}
     for region_key in REGION_CCY.keys():
         snapshot[region_key] = build_region_snapshot(events, region_key)
 
     snapshot["last_updated"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    print("DEBUG-snapshot-keys:", list(snapshot.keys()))
     return snapshot
