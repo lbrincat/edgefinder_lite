@@ -34,18 +34,23 @@ MACRO_REGION = {
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_prices(ticker: str, period: str = "6mo", interval: str = "1d"):
+    # swallow yfinance stdout/stderr spam
+    buf = io.StringIO()
     try:
-        df = yf.download(
-            ticker,
-            period=period,
-            interval=interval,
-            auto_adjust=True,
-            progress=False,
-        )
-        if isinstance(df, pd.DataFrame):
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            df = yf.download(
+                ticker,
+                period=period,
+                interval=interval,
+                auto_adjust=True,
+                progress=False,
+            )
+        if isinstance(df, pd.DataFrame) and not df.empty:
             return df.dropna()
-        return pd.DataFrame()
-    except Exception:
+        else:
+            return pd.DataFrame()
+    except Exception as e:
+        print(f"PRICE-ERROR {ticker}:", e)
         return pd.DataFrame()
 
 def score_trend(df: pd.DataFrame) -> int:
