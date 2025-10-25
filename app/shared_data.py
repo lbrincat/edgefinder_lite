@@ -1,253 +1,179 @@
 import requests
-from bs4 import BeautifulSoup
-import re
 from datetime import datetime
 import streamlit as st
 
-# We'll try using the mobile site versions for lighter HTML.
-REGION_URLS = {
-    "us": "https://m.investing.com/economic-calendar/united-states",
-    "eurozone": "https://m.investing.com/economic-calendar/euro-zone",
-    "uk": "https://m.investing.com/economic-calendar/united-kingdom",
-    "canada": "https://m.investing.com/economic-calendar/canada",
-    "australia": "https://m.investing.com/economic-calendar/australia",
-    "new_zealand": "https://m.investing.com/economic-calendar/new-zealand",
-    "switzerland": "https://m.investing.com/economic-calendar/switzerland",
-    "japan": "https://m.investing.com/economic-calendar/japan",
+# Map dashboard regions to currency codes coming from your PHP API
+REGION_CCY = {
+    "us": "USD",
+    "eurozone": "EUR",
+    "uk": "GBP",
+    "canada": "CAD",
+    "australia": "AUD",
+    "new_zealand": "NZD",
+    "switzerland": "CHF",
+    "japan": "JPY",
 }
 
-MOBILE_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Linux; Android 10; Pixel 4 XL) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0 Mobile Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-}
+# Your InfinityFree endpoint
+API_URL = "https://economic-calendar.ct.ws/calendar.php"
 
 
-def _fetch_calendar_html(url: str):
+def fetch_calendar_events():
     """
-    Download the page HTML for a region.
-    We spoof a mobile device UA to avoid heavier desktop anti-bot.
-    Return None if blocked or error.
-    """
-    if not url:
-        return None
-    try:
-        resp = requests.get(url, headers=MOBILE_HEADERS, timeout=6)
-        if resp.status_code == 200 and resp.text:
-            return resp.text
-    except Exception:
-        return None
-    return None
-
-
-def _clean_text(text: str | None) -> str:
-    if not text:
-        return ""
-    return " ".join(text.split()).strip()
-
-
-def _extract_numeric_percent(txt: str | None):
-    """
-    Find the first thing that looks like a percent: 0.5%, -0.2%, etc.
-    Return float (0.5, -0.2, etc.) or None.
-    """
-    if not txt:
-        return None
-    m = re.search(r"([-+]?\d+\.\d+)\s*%", txt)
-    if not m:
-        return None
-    try:
-        return float(m.group(1))
-    except Exception:
-        return None
-
-
-def _extract_numeric_plain(txt: str | None):
-    """
-    For PMI where it's usually like "51.2"
-    Return float(51.2) or None.
-    """
-    if not txt:
-        return None
-    m = re.search(r"([-+]?\d+\.\d+)", txt)
-    if not m:
-        return None
-    try:
-        return float(m.group(1))
-    except Exception:
-        return None
-
-
-def _parse_calendar_table(html: str):
-    """
-    Parse the HTML with BeautifulSoup.
-    We'll look for table rows (<tr>) that contain indicator names.
-    We'll try to pull columns like Actual / Forecast / Previous.
-    Return a list of dict rows like:
+    Fetch all econ events as JSON from your InfinityFree PHP script.
+    Expected per item:
       {
-        'name': 'Retail Sales (MoM)',
-        'actual': '0.5%',
-        'forecast': '0.2%',
-        'previous': '0.3%'
+        "currency": "USD",
+        "event": "Retail Sales (MoM)",
+        "actual": "0.7%",
+        "forecast": "0.2%",
+        "previous": "0.3%",
+        "timestamp": "2025-10-22T12:30:00Z"
       }
-    If we can't find structured <tr>, we fall back to regex scraping of the whole HTML.
     """
-    data_rows = []
-
-    if not html:
-        return data_rows
-
-    soup = BeautifulSoup(html, "html.parser")
-
-    # Heuristic: Find all rows that look like economic calendar lines
-    # Often Investing.com uses <tr> with multiple <td>, where first column is event name.
-    for tr in soup.find_all("tr"):
-        tds = tr.find_all("td")
-        if len(tds) < 4:
-            continue
-
-        # Clean all cells
-        cells = [_clean_text(td.get_text()) for td in tds]
-
-        # We try to guess columns:
-        # [time?, event name, actual, forecast, previous, ...]
-        # We'll try flexible matching.
-        event_name = cells[1] if len(cells) > 1 else ""
-        actual_val = cells[2] if len(cells) > 2 else ""
-        forecast_val = cells[3] if len(cells) > 3 else ""
-        previous_val = cells[4] if len(cells) > 4 else ""
-
-        if any(keyword in event_name.lower() for keyword in ["retail sales", "pmi", "cpi", "consumer price", "inflation"]):
-            data_rows.append({
-                "name": event_name,
-                "actual_raw": actual_val,
-                "forecast_raw": forecast_val,
-                "previous_raw": previous_val,
-            })
-
-    # If that failed (0 rows found), we fall back to very rough regex scan
-    if not data_rows:
-        # crude fallback block slicing
-        for kw in ["Retail Sales", "retail sales", "PMI", "pmi", "CPI", "cpi", "Consumer Price", "consumer price"]:
-            idx = html.lower().find(kw.lower())
-            if idx == -1:
-                continue
-            block = html[idx: idx + 400]
-            # Pull up to 3 percentages for actual/forecast/previous
-            percents = re.findall(r"[-+]?\d+\.\d+\s*%", block)
-            data_rows.append({
-                "name": kw,
-                "actual_raw": percents[0] if len(percents) > 0 else "",
-                "forecast_raw": percents[1] if len(percents) > 1 else "",
-                "previous_raw": percents[2] if len(percents) > 2 else "",
-            })
-
-    return data_rows
+    try:
+        resp = requests.get(
+            API_URL,
+            timeout=8,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0 Safari/537.36"
+                ),
+                "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
+                "Referer": "https://economic-calendar.ct.ws/",
+            },
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        else:
+            # fallback if something weird happens
+            return []
+    except Exception:
+        return []
 
 
-def _extract_indicator_rows(rows, indicator_keywords):
+def _pct_to_float(pct_str):
     """
-    Filter parsed table rows for the first one whose 'name' matches any keyword.
-    Returns that row dict or None.
+    '0.7%' -> 0.7
+    '-0.5%' -> -0.5
+    '2.1%' -> 2.1
+    None or '' -> None
     """
-    for r in rows:
-        n = r.get("name", "").lower()
-        if any(k in n for k in indicator_keywords):
-            return r
-    return None
+    if not isinstance(pct_str, str):
+        return None
+    cleaned = pct_str.replace("%", "").strip()
+    if cleaned == "" or cleaned.lower() == "n/a":
+        return None
+    try:
+        return float(cleaned)
+    except Exception:
+        return None
 
 
-def parse_retail_sales(rows):
+def _num_to_float(x):
     """
-    Look for Retail Sales.
-    Return dict {actual, forecast, previous} as floats (percent m/m) or None.
+    '51.2' -> 51.2
+    48.7   -> 48.7
+    etc.
     """
-    r = _extract_indicator_rows(
-        rows,
-        ["retail sales"]
+    if x is None:
+        return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    try:
+        return float(str(x).strip())
+    except Exception:
+        return None
+
+
+def _pick_latest(events_for_ccy, keywords):
+    """
+    From all events for one currency (USD, EUR, ...),
+    pick the most recent row whose 'event' field matches any keyword.
+    We'll sort by timestamp desc.
+    """
+    filtered = []
+    for ev in events_for_ccy:
+        name = str(ev.get("event", "")).lower()
+        if any(k.lower() in name for k in keywords):
+            filtered.append(ev)
+
+    if not filtered:
+        return None
+
+    def parse_ts(ts):
+        # timestamps are like "2025-10-22T12:30:00Z"
+        t = str(ts or "")
+        try:
+            return datetime.fromisoformat(t.replace("Z", "+00:00"))
+        except Exception:
+            return datetime.min
+
+    filtered.sort(key=lambda ev: parse_ts(ev.get("timestamp")), reverse=True)
+    return filtered[0]
+
+
+def build_region_components(events_for_ccy):
+    """
+    Extract 3 macro pillars for that currency:
+    Retail Sales, PMI, CPI.
+    Return (retail, pmi, cpi) where each is a dict
+    or None if not found.
+    """
+
+    # Retail Sales
+    retail_ev = _pick_latest(
+        events_for_ccy,
+        ["retail sales", "retail sales (mom)", "core retail sales"]
     )
-    if not r:
-        return None
+    retail = None
+    if retail_ev:
+        retail = {
+            "actual": _pct_to_float(retail_ev.get("actual")),
+            "forecast": _pct_to_float(retail_ev.get("forecast")),
+            "previous": _pct_to_float(retail_ev.get("previous")),
+        }
 
-    actual = _extract_numeric_percent(r.get("actual_raw"))
-    forecast = _extract_numeric_percent(r.get("forecast_raw"))
-    previous = _extract_numeric_percent(r.get("previous_raw"))
-
-    if actual is None and forecast is None and previous is None:
-        return None
-
-    return {
-        "actual": actual,
-        "forecast": forecast,
-        "previous": previous,
-    }
-
-
-def parse_pmi(rows):
-    """
-    Look for PMI (Composite/Manufacturing/Services).
-    We'll just grab the first PMI-style row.
-    Return dict {current, previous} as floats or None.
-    """
-    r = _extract_indicator_rows(
-        rows,
-        ["pmi"]
+    # PMI
+    pmi_ev = _pick_latest(
+        events_for_ccy,
+        ["pmi", "manufacturing pmi", "services pmi", "composite pmi"]
     )
-    if not r:
-        return None
+    pmi = None
+    if pmi_ev:
+        pmi = {
+            "current": _num_to_float(pmi_ev.get("actual")),
+            "previous": _num_to_float(pmi_ev.get("previous")),
+        }
 
-    current = _extract_numeric_plain(r.get("actual_raw"))
-    prev    = _extract_numeric_plain(r.get("previous_raw"))
-
-    if current is None and prev is None:
-        return None
-
-    return {
-        "current": current,
-        "previous": prev,
-    }
-
-
-def parse_cpi(rows):
-    """
-    Look for CPI / Consumer Price Index / Inflation.
-    Return dict {actual_yoy, forecast_yoy, previous_yoy} (floats, % YoY if available)
-    We attempt to treat the row as YoY.
-    """
-    r = _extract_indicator_rows(
-        rows,
-        ["cpi", "consumer price", "inflation"]
+    # CPI / Inflation
+    cpi_ev = _pick_latest(
+        events_for_ccy,
+        ["cpi", "inflation", "inflation rate", "cpi (yoy)"]
     )
-    if not r:
-        return None
+    cpi = None
+    if cpi_ev:
+        cpi = {
+            "actual_yoy": _pct_to_float(cpi_ev.get("actual")),
+            "forecast_yoy": _pct_to_float(cpi_ev.get("forecast")),
+            "previous_yoy": _pct_to_float(cpi_ev.get("previous")),
+        }
 
-    actual = _extract_numeric_percent(r.get("actual_raw"))
-    forecast = _extract_numeric_percent(r.get("forecast_raw"))
-    previous = _extract_numeric_percent(r.get("previous_raw"))
-
-    if actual is None and forecast is None and previous is None:
-        return None
-
-    return {
-        "actual_yoy": actual,
-        "forecast_yoy": forecast,
-        "previous_yoy": previous,
-    }
+    return retail, pmi, cpi
 
 
 def score_region_macro(retail, pmi, cpi):
     """
-    Same scoring logic:
-    +1 if retail sales looks strong
-    +1 if PMI looks expansionary/improving
-    +1 if CPI looks hot (supports higher-for-longer rates)
+    +1 Retail Sales beat forecast or previous
+    +1 PMI >=50 or improving
+    +1 CPI hotter than forecast (implies rate pressure)
+    Clamp 0..3
     """
     score = 0
 
-    # Retail: actual beats forecast or previous
+    # Retail
     if retail:
         a = retail.get("actual")
         f = retail.get("forecast")
@@ -256,7 +182,7 @@ def score_region_macro(retail, pmi, cpi):
             if (f is not None and a > f) or (p is not None and a > p):
                 score += 1
 
-    # PMI: current >= 50 (expansion) OR > previous
+    # PMI
     if pmi:
         cur = pmi.get("current")
         prev = pmi.get("previous")
@@ -266,7 +192,7 @@ def score_region_macro(retail, pmi, cpi):
             elif prev is not None and cur > prev:
                 score += 1
 
-    # CPI: actual > forecast (hot inflation)
+    # CPI
     if cpi:
         act = cpi.get("actual_yoy")
         fc  = cpi.get("forecast_yoy")
@@ -276,7 +202,11 @@ def score_region_macro(retail, pmi, cpi):
             elif fc is None and act is not None and act >= 2.0:
                 score += 1
 
-    return max(0, min(score, 3))
+    if score < 0:
+        score = 0
+    if score > 3:
+        score = 3
+    return score
 
 
 def summarize_bias(score: int):
@@ -289,22 +219,26 @@ def summarize_bias(score: int):
     return "Weak macro, bearish bias"
 
 
-def get_region_macro(region_key: str):
+def build_region_snapshot(events, region_key):
     """
-    Fetch + parse one region.
-    Always returns a dict with keys:
-      retail, pmi, cpi, score, bias
-    Even if scraping fails, we still return a fallback (score=0).
+    One region = one currency code.
+    Example: region_key 'us' -> USD.
+    We'll gather that currency's events and build:
+    { retail, pmi, cpi, score, bias }
     """
-    url = REGION_URLS.get(region_key)
-    html = _fetch_calendar_html(url)
+    ccy = REGION_CCY.get(region_key)
+    if not ccy:
+        return {
+            "retail": None,
+            "pmi": None,
+            "cpi": None,
+            "score": 1,
+            "bias": "Neutral / mixed",
+        }
 
-    rows = _parse_calendar_table(html)
+    events_for_ccy = [ev for ev in events if ev.get("currency") == ccy]
 
-    retail = parse_retail_sales(rows)
-    pmi    = parse_pmi(rows)
-    cpi    = parse_cpi(rows)
-
+    retail, pmi, cpi = build_region_components(events_for_ccy)
     score = score_region_macro(retail, pmi, cpi)
     bias_text = summarize_bias(score)
 
@@ -317,15 +251,24 @@ def get_region_macro(region_key: str):
     }
 
 
-@st.cache_data(ttl=43200, show_spinner=False)  # cache 12h
+@st.cache_data(ttl=43200, show_spinner=False)
 def get_macro_snapshot_all():
     """
-    Build snapshot for all regions + timestamp.
-    Streamlit will cache this so we don't hammer the source.
+    Pull data (cached ~12h) and build the macro snapshot for all regions.
+    Shape:
+    {
+      "us": {...},
+      "eurozone": {...},
+      "uk": {...},
+      ...
+      "last_updated": "2025-10-25 14:07 UTC"
+    }
     """
+    events = fetch_calendar_events()
+
     snapshot = {}
-    for region_key in REGION_URLS.keys():
-        snapshot[region_key] = get_region_macro(region_key)
+    for region_key in REGION_CCY.keys():
+        snapshot[region_key] = build_region_snapshot(events, region_key)
 
     snapshot["last_updated"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     return snapshot
